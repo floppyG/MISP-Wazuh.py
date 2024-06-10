@@ -71,8 +71,8 @@ if __name__ == "__main__":
     logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     # MISP configuration
-    base_url = "YOUR MISP IP"
-    api_key = "YOUR MISP KEY"
+    base_url = "YOUR MISP IP" #ADD YOUR MISP URL
+    api_key = "YOUR MISP KEY" #ADD YOUR MISP KEY (Administration ->List Auth Keys ->Add authentication key)
     misp_client = MISPClient(base_url, api_key)
 
     # Determine the socket address dynamically
@@ -100,7 +100,7 @@ if __name__ == "__main__":
 
     rule_id = alert.get('rule', {}).get('id')
 
-    if rule_id in ["105018", "4800"]:
+    if rule_id in ["INSERT_YOUR_RULE_ID", "INSERT_YOUR_RULE_ID_2..."]: #MODIFY THIS LINE
         ip_to_search = alert.get('data', {}).get('srcip')
         if ip_to_search:
             search_result = misp_client.search_ip_events(ip_to_search)
