@@ -7,7 +7,7 @@ import requests
 from requests.exceptions import ConnectionError
 from datetime import datetime
 
-# Disabilita i warning relativi alla verifica del certificato SSL
+# Disable SSL warning verify
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 class MISPClient:
