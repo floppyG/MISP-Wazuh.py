@@ -17,7 +17,6 @@ except Exception as e:
 
 debug_enabled = True
 pwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-socket_addr = "{0}/queue/sockets/queue".format(pwd)
 
 # Socket address for Wazuh
 socket_addr = "{0}/queue/sockets/queue".format(pwd)
