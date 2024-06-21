@@ -1,10 +1,12 @@
 #!/var/ossec/framework/python/bin/python3
-# Copyright (C) 2015-2022, Wazuh Inc.
+# Copyright Whysecurity Srl Cellatica 2024.
 
 import json
 import sys
 import time
 import os
+import ipaddress
+import logging
 from socket import socket, AF_UNIX, SOCK_DGRAM
 
 try:
@@ -18,44 +20,59 @@ except Exception as e:
 debug_enabled = True
 socket_addr = "/var/ossec/queue/sockets/queue"  # Default Wazuh socket path
 
+# Configure logging
+logging.basicConfig(
+    filename='debug.log',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%a %b %d %H:%M:%S %Z %Y'
+)
+
 def main(args):
-    debug("# Starting")
+    debug("Starting script execution")
     
     # Check arguments
     if len(args) < 3:
-        print("Usage: python script_name.py path_to_alerts.json api_key")
+        logging.error("Usage: python script_name.py path_to_alerts.json api_key")
         sys.exit(1)
 
+    # Getting input arguments by Wazuh 
     alert_file_location = args[1]
     api_key = args[2]
 
-    debug("# File location")
-    debug(alert_file_location)
-    debug("# API Key")
-    debug(api_key)
+    # Check arguments on CLI environment
+    debug(f"File location: {alert_file_location}")
+    debug(f"API Key: {api_key}")
 
     # Load alert. Parse JSON object.
+    debug("Loading and parsing alert file")
     with open(alert_file_location) as alert_file:
         json_alert = json.load(alert_file)
     
-    debug("# Processing alert")
-    debug(json.dumps(json_alert, indent=2))
+    debug("Alert loaded and parsed successfully")
+    debug(f"Parsed alert: {json.dumps(json_alert, indent=2)}")
 
     # Request MISP info
+    debug("Requesting MISP info")
     misp_info = request_misp_info(json_alert, api_key)
 
     # If positive match, handle or process the MISP info here
     if misp_info:
+        debug("Processing MISP info")
         process_misp_info(misp_info)
 
 def debug(msg):
     if debug_enabled:
-        now = time.strftime("%a %b %d %H:%M:%S %Z %Y")
-        msg = "{0}: {1}\n".format(now, msg)
-        print(msg)
+        logging.debug(msg)
+
+# Check if the IP is public
+def is_public_ip(ip):
+    ip_addr = ipaddress.ip_address(ip)
+    return not ip_addr.is_private
 
 def query_misp(ip, ip_type, api_key):
-    url = 'https://my-MISP-url/attributes/restSearch'
+    debug(f"Querying MISP for IP: {ip}, type: {ip_type}")
+    url = 'https://172.16.101.31/attributes/restSearch'
     headers = {
         'Accept': 'application/json',
         'Authorization': api_key,
@@ -68,62 +85,66 @@ def query_misp(ip, ip_type, api_key):
     }
     response = requests.post(url, headers=headers, json=payload, verify=False)
     if response.status_code == 200:
+        debug(f"MISP query successful for IP: {ip}, type: {ip_type}")
         return response.json()
     else:
-        debug(f"# Error: The MISP encountered an error. Status Code: {response.status_code}")
+        debug(f"Error: The MISP encountered an error. Status Code: {response.status_code}")
         sys.exit(1)
 
+# Check if the JSON is correctly formatted
 def request_misp_info(alert, api_key):
-    if "data" not in alert["_source"]:
-        debug("# No data found in the alert.")
+    debug("Checking if alert contains 'data'")
+    if "data" not in alert:
+        debug("No data found in the alert.")
         return None
 
-    # Initialize a dictionary to hold the IP information
     ip_info = {}
 
-    # Check for "srcip" within "data"
-    if "srcip" in alert["_source"]["data"]:
-        ip_info["srcip"] = alert["_source"]["data"]["srcip"]
+    debug("Extracting IP information from alert data")
+    if "srcip" in alert["data"]:
+        ip_info["srcip"] = alert["data"]["srcip"]
 
-    # Check for "dstip" within "data"
-    if "dstip" in alert["_source"]["data"]:
-        ip_info["dstip"] = alert["_source"]["data"]["dstip"]
+    if "dstip" in alert["data"]:
+        ip_info["dstip"] = alert["data"]["dstip"]
 
-    # Check for "srcPostNAT" within "data"
-    if "srcPostNAT" in alert["_source"]["data"]:
-        ip_info["srcPostNAT"] = alert["_source"]["data"]["srcPostNAT"]
+    if "srcPostNAT" in alert["data"]:
+        ip_info["srcPostNAT"] = alert["data"]["srcPostNAT"]
 
-    # If none of the desired keys are found, return None
+    debug("Filtering out private IPs")
+    ip_info = {key: value for key, value in ip_info.items() if is_public_ip(value)}
+
     if not ip_info:
-        debug("# No relevant IP information found in the alert.")
+        debug("No relevant public IP information found in the alert.")
         return None
 
-    # Request info using MISP API for each found IP
     misp_data = {}
     for key, value in ip_info.items():
         if key == "srcip":
+            debug(f"Querying MISP for source IP: {value}")
             misp_data[key] = query_misp(value, 'ip-src', api_key)
         elif key == "dstip":
+            debug(f"Querying MISP for destination IP: {value}")
             misp_data[key] = query_misp(value, 'ip-dst', api_key)
         elif key == "srcPostNAT":
-            # Query both ip-src and ip-dst for srcPostNAT
+            debug(f"Querying MISP for post-NAT source IP: {value}")
             misp_data[f"{key}_ip-src"] = query_misp(value, 'ip-src', api_key)
             misp_data[f"{key}_ip-dst"] = query_misp(value, 'ip-dst', api_key)
 
+    debug(f"MISP data retrieved: {json.dumps(misp_data, indent=2)}")
     return misp_data
 
 def process_misp_info(misp_info):
-    # Example: Print or process MISP info as needed
-    debug("Received MISP Info:")
-    debug(json.dumps(misp_info, indent=2))
+    debug("Processing received MISP Info")
+    debug(f"MISP Info: {json.dumps(misp_info, indent=2)}")
     print(misp_info)
-    # Send the MISP info to Wazuh using send_event function
     send_event(misp_info)
+
 
 def send_event(msg, agent=None):
     """
     Sends event data to Wazuh.
     """
+    debug("Sending event to Wazuh")
     if not agent or agent["id"] == "000":
         string = "1:misp:{0}".format(json.dumps(msg))
     else:
@@ -142,9 +163,9 @@ def send_event(msg, agent=None):
     except Exception as e:
         debug(f"Failed to send message to Wazuh socket: {str(e)}")
 
+
 if __name__ == "__main__":
     try:
-        # Main function
         main(sys.argv)
     except Exception as e:
         debug(str(e))
