@@ -72,7 +72,7 @@ def is_public_ip(ip):
 
 def query_misp(ip, ip_type, api_key):
     debug(f"Querying MISP for IP: {ip}, type: {ip_type}")
-    url = 'https://172.16.101.31/attributes/restSearch'
+    url = 'https://your-MISP-ip/attributes/restSearch'
     headers = {
         'Accept': 'application/json',
         'Authorization': api_key,
