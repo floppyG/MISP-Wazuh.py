@@ -1,6 +1,5 @@
 #!/var/ossec/framework/python/bin/python3
 # Copyright Whysecurity Srl Cellatica 2024.
-# TO TEST: ./CUTOM-MISP path/of/alert.json API_KEY
 
 import json
 import sys
@@ -58,7 +57,7 @@ def main(args):
         sys.exit(1)
 
     debug("Alert loaded and parsed successfully")
-    debug(f"Parsed alert: {json_alert}")
+    # debug(f"Parsed alert: {json_alert}")
 
     # Request MISP info
     debug("Requesting MISP info")
@@ -88,7 +87,7 @@ def query_misp(ip, ip_type, api_key):
     Query the MISP server for information about the IP.
     """
     debug(f"Querying MISP for IP: {ip}, type: {ip_type}")
-    url = 'https://YOUR_MISP_IP/attributes/restSearch'
+    url = 'https://172.16.101.31/attributes/restSearch'
     headers = {
         'Accept': 'application/json',
         'Authorization': api_key,
@@ -111,56 +110,53 @@ def query_misp(ip, ip_type, api_key):
         logging.error(f"Failed to query MISP: {str(e)}")
         sys.exit(1)
 
+import re
+import json
+
+
 def request_misp_info(alert, api_key):
     """
-    Extract relevant IP information from the alert and query MISP.
+    Estrae tutti gli indirizzi IP pubblici utilizzando una regex, elimina duplicati
+    e interroga MISP.
     """
-    debug("Checking if alert contains '_source -> data'")
+    debug("Extracting IP addresses using regex")
     ip_info = {}
 
-    debug("Extracting IP information from alert data")
-    if "_source" in alert and "data" in alert["_source"]:
-        data = alert["_source"]["data"]
-        if "srcip" in data:
-            ip_info["srcip"] = data["srcip"]
-        if "dstip" in data:
-            ip_info["dstip"] = data["dstip"]
-        if "srcPostNAT" in data:
-            ip_info["srcPostNAT"] = data["srcPostNAT"]
-    elif "data" in alert:
-        data = alert["data"]
-        if "srcip" in data:
-            ip_info["srcip"] = data["srcip"]
-        if "dstip" in data:
-            ip_info["dstip"] = data["dstip"]
-        if "srcPostNAT" in data:
-            ip_info["srcPostNAT"] = data["srcPostNAT"]
-    else:
-        debug(f"No data found in JSON path")
-        return
+    # Regex per identificare indirizzi IP
+    ip_regex = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
 
-    debug("Filtering out private IPs")
-    ip_info = {key: value for key, value in ip_info.items() if is_public_ip(value)}
+    # Converte il JSON dell'alert in stringa per cercare indirizzi IP ovunque
+    alert_str = json.dumps(alert)
 
-    if not ip_info:
-        debug("No relevant public IP information found in the alert.")
+    # Trova tutti gli indirizzi IP nell'alert
+    found_ips = re.findall(ip_regex, alert_str)
+
+    # Filtra solo indirizzi pubblici ed elimina duplicati
+    public_ips = list(set(ip for ip in found_ips if is_public_ip(ip)))
+
+    if not public_ips:
+        debug("No public IPs found in the alert.")
         return None
 
+    # Costruisce il dizionario ip_info con i tipi di IP raccolti
+    for ip in public_ips:
+        if ip not in ip_info.values():
+            ip_info[ip] = ip
+
+    # MISP data
     misp_data = {}
-    for key, value in ip_info.items():
-        if key == "srcip":
-            debug(f"Querying MISP for source IP: {value}")
-            misp_data[key] = query_misp(value, 'ip-src', api_key)
-        elif key == "dstip":
-            debug(f"Querying MISP for destination IP: {value}")
-            misp_data[key] = query_misp(value, 'ip-dst', api_key)
-        elif key == "srcPostNAT":
-            debug(f"Querying MISP for post-NAT source IP: {value}")
-            misp_data[f"{key}_ip-src"] = query_misp(value, 'ip-src', api_key)
-            misp_data[f"{key}_ip-dst"] = query_misp(value, 'ip-dst', api_key)
+    for ip in ip_info.values():
+        debug(f"Querying MISP for IP: {ip}")
+        # Invia la query a MISP per ip-src e ip-dst
+        misp_data[ip] = {
+            'ip-src': query_misp(ip, 'ip-src', api_key),
+            'ip-dst': query_misp(ip, 'ip-dst', api_key)
+        }
 
     debug(f"MISP data retrieved: {json.dumps(misp_data, indent=2)}")
     return misp_data
+
+
 
 def process_misp_info(misp_info):
     """
@@ -168,13 +164,22 @@ def process_misp_info(misp_info):
     """
     debug("Processing received MISP Info")
 
+    # INSERIRE IP CONSIDERATI FALSI POSITIVI QUI
+    excluded_ips = ["204.79.197.203", "1.1.1.1"]
+
     for key, value in misp_info.items():
         if isinstance(value, dict) and 'response' in value and 'Attribute' in value['response']:
             attributes = value['response']['Attribute']
 
             for attribute in attributes:
+                # Controlla se l'attributo contiene un IP escluso
+                if "value" in attribute and attribute["value"] in excluded_ips:
+                    debug(f"Skipping event for excluded IP: {attribute['value']}")
+                    continue
+
                 debug(f"MISP response each: {attribute}")
                 send_event(attribute)
+
 
 def send_event(msg, agent=None):
     """
