@@ -1,14 +1,19 @@
 #!/var/ossec/framework/python/bin/python3
 # Copyright Whysecurity Srl Cellatica 2024.
 
+# Import required libraries
 import json
 import sys
-import time
-import os
 import ipaddress
 import logging
+import re
+import urllib3
 from socket import socket, AF_UNIX, SOCK_DGRAM
 
+# Disable security warnings for unverified HTTPS connections
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Import 'requests' library for HTTP requests and handle missing module
 try:
     import requests
     from requests.auth import HTTPBasicAuth
@@ -16,13 +21,13 @@ except Exception as e:
     print("No module 'requests' found. Install: pip install requests")
     sys.exit(1)
 
-# Global vars
-debug_enabled = True
+# Global variables
+debug_enabled = True  # Toggle debug mode
 socket_addr = "/var/ossec/queue/sockets/queue"  # Default Wazuh socket path
 
-# Configure logging
+# Configure logging to output to a file
 logging.basicConfig(
-    filename='/var/ossec/logs/debug.log',
+    filename='debug.log',  # Log file path
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%a %b %d %H:%M:%S %Z %Y'
@@ -30,25 +35,22 @@ logging.basicConfig(
 
 def main(args):
     """
-    Main function to execute the script.
+    Main function to execute the script. It handles arguments, loads alerts, 
+    and initiates MISP queries.
     """
     debug("Starting script execution")
 
-    # Check arguments
+    # Validate command-line arguments
     if len(args) < 3:
         logging.error("Usage: python script_name.py path_to_alerts.json api_key")
         sys.exit(1)
 
-    # Getting input arguments by Wazuh
-    alert_file_location = args[1]
-    api_key = args[2]
+    # Retrieve arguments
+    alert_file_location = args[1]  # Path to the alerts JSON file
+    api_key = args[2]  # MISP API key
 
-    # Check arguments on CLI environment
-    debug(f"File location: {alert_file_location}")
-    # debug(f"API Key: {api_key}")
-
-    # Load alert. Parse JSON object.
     debug("Loading and parsing alert file")
+    # Load and parse the alert JSON file
     try:
         with open(alert_file_location) as alert_file:
             json_alert = json.load(alert_file)
@@ -56,136 +58,125 @@ def main(args):
         logging.error(f"Failed to load or parse the alert file: {str(e)}")
         sys.exit(1)
 
-    debug("Alert loaded and parsed successfully")
-    # debug(f"Parsed alert: {json_alert}")
-
-    # Request MISP info
-    debug("Requesting MISP info")
+    debug("Alert loaded successfully")
+    # Query MISP for information based on extracted IPs
     misp_info = request_misp_info(json_alert, api_key)
 
-    # If positive match, handle or process the MISP info here
+    # Process the response if available
     if misp_info:
-        debug("Processing MISP info")
         process_misp_info(misp_info)
 
 def debug(msg):
-    """
-    Debug message logger.
-    """
+    """Logs a debug message if debug mode is enabled."""
     if debug_enabled:
         logging.debug(msg)
 
 def is_public_ip(ip):
-    """
-    Check if the IP is public.
-    """
+    """Checks whether the provided IP address is a public IP."""
     ip_addr = ipaddress.ip_address(ip)
-    return not ip_addr.is_private
+    return not ip_addr.is_private  # Return True for public IPs, False otherwise
 
 def query_misp(ip, ip_type, api_key):
     """
-    Query the MISP server for information about the IP.
+    Sends a query to the MISP server to retrieve information for a specific IP.
+
+    Args:
+        ip (str): The IP address to query.
+        ip_type (str): The type of IP (e.g., 'ip-src', 'ip-dst').
+        api_key (str): The API key for authentication with MISP.
+
+    Returns:
+        dict or None: Parsed JSON response from MISP or None on failure.
     """
-    debug(f"Querying MISP for IP: {ip}, type: {ip_type}")
-    url = 'https://172.16.101.31/attributes/restSearch'
-    headers = {
-        'Accept': 'application/json',
-        'Authorization': api_key,
-        'Content-Type': 'application/json'
-    }
-    payload = {
-        'returnFormat': 'json',
-        'type': ip_type,
-        'value': ip
-    }
+    url = 'https://<your_MISP_IP>/attributes/restSearch'  # MISP API endpoint
+    headers = {'Accept': 'application/json', 'Authorization': api_key}
+    payload = {'returnFormat': 'json', 'type': ip_type, 'value': ip}
+
     try:
+        print(f"Sending query to MISP for IP: {ip}, type: {ip_type}")
         response = requests.post(url, headers=headers, json=payload, verify=False)
+        
+        print(f"Response Status Code: {response.status_code}")
+        print(f"Response Content: {response.text}")  # Print full response for debugging
+
         if response.status_code == 200:
-            debug(f"MISP query successful for IP: {ip}, type: {ip_type}")
-            return response.json()
+            return response.json()  # Parse and return JSON response
         else:
-            debug(f"Error: The MISP encountered an error. Status Code: {response.status_code}")
-            sys.exit(1)
+            debug(f"Error querying MISP: {response.status_code}")
+            return None
     except Exception as e:
         logging.error(f"Failed to query MISP: {str(e)}")
-        sys.exit(1)
-
-import re
-import json
-
+        return None
 
 def request_misp_info(alert, api_key):
     """
-    Estrae tutti gli indirizzi IP pubblici utilizzando una regex, elimina duplicati
-    e interroga MISP.
+    Extracts public IPs from the alert and queries MISP for information.
+
+    Args:
+        alert (dict): Parsed alert JSON data.
+        api_key (str): MISP API key for authentication.
+
+    Returns:
+        dict: MISP information for each IP address.
     """
-    debug("Extracting IP addresses using regex")
-    ip_info = {}
+    debug("Extracting IPs using regex")
+    ip_regex = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'  # Regex to match IPv4 addresses
+    alert_str = json.dumps(alert)  # Convert alert to string for regex matching
+    found_ips = re.findall(ip_regex, alert_str)  # Find all IPs in the alert
 
-    # Regex per identificare indirizzi IP
-    ip_regex = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
-
-    # Converte il JSON dell'alert in stringa per cercare indirizzi IP ovunque
-    alert_str = json.dumps(alert)
-
-    # Trova tutti gli indirizzi IP nell'alert
-    found_ips = re.findall(ip_regex, alert_str)
-
-    # Filtra solo indirizzi pubblici ed elimina duplicati
+    # Filter only public IPs
     public_ips = list(set(ip for ip in found_ips if is_public_ip(ip)))
-
     if not public_ips:
-        debug("No public IPs found in the alert.")
+        debug("No public IPs found.")
         return None
 
-    # Costruisce il dizionario ip_info con i tipi di IP raccolti
-    for ip in public_ips:
-        if ip not in ip_info.values():
-            ip_info[ip] = ip
-
-    # MISP data
+    # Query MISP for each public IP
     misp_data = {}
-    for ip in ip_info.values():
-        debug(f"Querying MISP for IP: {ip}")
-        # Invia la query a MISP per ip-src e ip-dst
+    for ip in public_ips:
         misp_data[ip] = {
             'ip-src': query_misp(ip, 'ip-src', api_key),
             'ip-dst': query_misp(ip, 'ip-dst', api_key)
         }
-
-    debug(f"MISP data retrieved: {json.dumps(misp_data, indent=2)}")
     return misp_data
-
-
 
 def process_misp_info(misp_info):
     """
-    Process the MISP information and send relevant data to Wazuh.
+    Processes the retrieved MISP information and sends events to Wazuh.
+
+    Args:
+        misp_info (dict): MISP data organized by IP address.
     """
-    debug("Processing received MISP Info")
+    print("Processing MISP data...")
+    print(json.dumps(misp_info, indent=4))  # Print full MISP object for debugging
 
-    # INSERIRE IP CONSIDERATI FALSI POSITIVI QUI
-    excluded_ips = ["204.79.197.203", "1.1.1.1"]
+    # Define a list of excluded IPs to ignore
+    excluded_ips = ["IPv4_1", "1.1.1.1"]
 
+    # Iterate over the MISP information for each IP
     for key, value in misp_info.items():
+        print(f"Checking data for IP: {key}")
         if isinstance(value, dict) and 'response' in value and 'Attribute' in value['response']:
             attributes = value['response']['Attribute']
-
             for attribute in attributes:
-                # Controlla se l'attributo contiene un IP escluso
+                # Skip excluded IP addresses
                 if "value" in attribute and attribute["value"] in excluded_ips:
-                    debug(f"Skipping event for excluded IP: {attribute['value']}")
+                    print(f"Skipping excluded IP: {attribute['value']}")
                     continue
-
-                debug(f"MISP response each: {attribute}")
+                # Send relevant attribute to Wazuh
                 send_event(attribute)
-
+        else:
+            print(f"No valid attributes for IP: {key}")
 
 def send_event(msg, agent=None):
     """
-    Sends event data to Wazuh.
+    Sends event data to the Wazuh socket for processing.
+
+    Args:
+        msg (dict): The message/event data to send.
+        agent (dict, optional): Agent information. Defaults to None.
     """
     debug("Sending event to Wazuh")
+    # Format the message string based on agent information
     if not agent or agent["id"] == "000":
         string = "1:misp:{0}".format(json.dumps(msg))
     else:
@@ -196,6 +187,7 @@ def send_event(msg, agent=None):
             json.dumps(msg),
         )
     try:
+        # Open a Unix socket and send the message
         sock = socket(AF_UNIX, SOCK_DGRAM)
         sock.connect(socket_addr)
         sock.send(string.encode())
@@ -205,6 +197,9 @@ def send_event(msg, agent=None):
         debug(f"Failed to send message to Wazuh socket: {str(e)}")
 
 if __name__ == "__main__":
+    """
+    Entry point for the script. Handles uncaught exceptions gracefully.
+    """
     try:
         main(sys.argv)
     except Exception as e:
