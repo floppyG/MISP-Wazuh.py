@@ -61,9 +61,11 @@ def main(args):
     # Query MISP for information about the extracted public IPs
     misp_info = request_misp_info(json_alert, api_key)
 
-    # Process and send the received MISP information to Wazuh
+    # Process and send the enriched log to Wazuh
     if misp_info:
-        process_misp_info(misp_info)
+        process_misp_info(misp_info, json_alert)
+
+    debug("Script execution completed")
 
 def debug(msg):
     """Log debug messages if debugging is enabled."""
@@ -77,7 +79,7 @@ def is_public_ip(ip):
 
 def query_misp(ip, ip_type, api_key):
     """Query the MISP server for IP information."""
-    url = 'https://Y.Y.Y.Y/attributes/restSearch'  # MISP API endpoint
+    url = 'https://172.16.101.31/attributes/restSearch'  # MISP API endpoint
     headers = {
         'Accept': 'application/json',
         'Authorization': api_key  # API key for authentication
@@ -129,64 +131,80 @@ def request_misp_info(alert, api_key):
         }
     return misp_data
 
-def process_misp_info(misp_info):
+def process_misp_info(misp_info, original_alert):
     """
-    Process the MISP information and send relevant data to Wazuh.
+    Integra i risultati di MISP direttamente nel log originale e lo invia a Wazuh.
+    Ogni valore di MISP viene iniettato come un campo separato.
     """
-    debug("Processing received MISP Info")
+    debug("Integrating MISP data into the original log")
 
-    # List of excluded IPs (IPs to ignore)
-    excluded_ips = ["IPv4_1", "1.1.1.1"]
+    excluded_ips = ["8.8.8.8", "1.1.1.1"]
+    misp_value, misp_category, misp_comment, misp_type, misp_timestamp = None, None, None, None, None
 
-    # Process each IP and its associated data
     for ip, data in misp_info.items():
-        debug(f"Checking data for IP: {ip}")
+        debug(f"Processing data for IP: {ip}")
 
-        for ip_type, response in data.items():  # For 'ip-src' and 'ip-dst'
+        for ip_type, response in data.items():
             if not response:
-                debug(f"No response for {ip} ({ip_type})")
+                debug(f"No response from MISP for {ip} ({ip_type})")
                 continue
 
-            # Extract 'Attribute' data from the response
             attributes = response.get("response", {}).get("Attribute", [])
+
             if not attributes:
-                debug(f"No valid attributes for {ip} ({ip_type})")
+                debug(f"No valid attributes found for {ip} ({ip_type})")
                 continue
 
-            # Send each attribute to Wazuh if it's not in the excluded list
             for attribute in attributes:
                 if "value" in attribute and attribute["value"] in excluded_ips:
                     debug(f"Skipping event for excluded IP: {attribute['value']}")
                     continue
 
-                debug(f"Sending attribute: {attribute}")
-                send_event(attribute)
+                # INIETTA i valori direttamente nel log originale, separati
+                original_alert["misp_value"] = attribute["value"]
+                original_alert["misp_category"] = attribute.get("category", "unknown")
+                original_alert["misp_comment"] = attribute.get("comment", "")
+                original_alert["misp_type"] = attribute.get("type", "unknown")
+                original_alert["misp_timestamp"] = attribute.get("timestamp", "")
+
+                break  # Esce dopo aver trovato il primo risultato valido
+
+            if "misp_value" in original_alert:
+                break  # Interrompe il ciclo principale se ha già trovato dati
+
+    send_event(original_alert)
+
 
 def send_event(msg, agent=None):
     """
-    Sends event data to Wazuh.
+    Invia il log aggiornato a Wazuh con i dati MISP integrati.
     """
-    debug("Preparing to send event to Wazuh")
+    debug("Preparazione per l'invio dell'evento arricchito a Wazuh")
+    
     try:
-        # Format the message to send to Wazuh
+        # Formatta il messaggio da inviare a Wazuh
         if not agent or agent["id"] == "000":
-            string = "1:misp:{0}".format(json.dumps(msg))
+            string = "1:wazuh_misp:{0}".format(json.dumps(msg))
         else:
-            string = "1:[{0}] ({1}) {2}->misp:{3}".format(
+            string = "1:[{0}] ({1}) {2}->wazuh_misp:{3}".format(
                 agent["id"],
                 agent["name"],
                 agent.get("ip", "any"),
                 json.dumps(msg)
             )
-        debug(f"Formatted event message: {string}")
 
-        # Connect to Wazuh socket and send the message
+        debug(f"Messaggio formattato per Wazuh: {string}")
+
+        # Connetti al socket di Wazuh e invia il messaggio
         sock = socket(AF_UNIX, SOCK_DGRAM)
         sock.connect(socket_addr)
-        debug(f"Connected to socket: {socket_addr}")
-        sock.send(string.encode())  # Send the formatted message
-        debug("Message successfully sent to Wazuh socket")
+        sock.send(string.encode())
         sock.close()
+
+        debug("Messaggio arricchito inviato con successo a Wazuh")
+
+    except Exception as e:
+        debug(f"Errore nell'invio del messaggio a Wazuh: {str(e)}")
 
     except Exception as e:
         debug(f"Failed to send message to Wazuh socket: {str(e)}")
