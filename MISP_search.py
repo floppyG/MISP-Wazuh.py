@@ -1,6 +1,5 @@
 #!/var/ossec/framework/python/bin/python3
-# Copyright eDOK Srl Vobarno 2025.
-
+#code written for eDOK Srl Vobarno 2025
 import json
 import sys
 import ipaddress
@@ -10,6 +9,8 @@ import urllib3
 import os
 from socket import socket, AF_UNIX, SOCK_DGRAM
 import time
+import hashlib
+from datetime import datetime
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -22,7 +23,7 @@ except Exception as e:
     sys.exit(1)
 
 # Global Variables
-debug_enabled = False
+debug_enabled = False  # Set to True to enable detailed debug logs
 socket_addr = "/var/ossec/queue/sockets/queue"
 recent_logs_file = "/var/ossec/tmp/recent_misp_logs.json"
 deduplication_window = 3600  # Seconds (1 hour)
@@ -170,7 +171,7 @@ def main(args):
 
         # Process the MISP data for this IP
         if misp_data:
-            send_enriched_event(ip, misp_data, alert_context, context)
+            send_enriched_event(ip, misp_data, alert_context, context, json_alert)
             # Mark as processed
             log_tracker.mark_sent(dedup_key)
         else:
@@ -223,14 +224,29 @@ def extract_alert_context(alert):
     context = {
         'rule_id': alert.get('rule', {}).get('id', 'unknown'),
         'rule_description': alert.get('rule', {}).get('description', 'unknown'),
+        'rule_level': alert.get('rule', {}).get('level', 0),
+        'rule_groups': alert.get('rule', {}).get('groups', []),
         'timestamp': alert.get('timestamp', ''),
         'agent_id': alert.get('agent', {}).get('id', '000'),
-        'agent_name': alert.get('agent', {}).get('name', 'unknown')
+        'agent_name': alert.get('agent', {}).get('name', 'unknown'),
+        'agent_ip': alert.get('agent', {}).get('ip', 'unknown'),
+        'manager_name': alert.get('manager', {}).get('name', 'unknown'),
+        'location': alert.get('location', 'unknown'),
+        'decoder_name': alert.get('decoder', {}).get('name', 'unknown')
     }
 
     # Add more specific fields based on rule type
     if 'data' in alert:
         context['data_fields'] = list(alert['data'].keys())
+
+        # Extract common syscheck fields if present
+        if 'syscheck' in alert:
+            syscheck = alert.get('syscheck', {})
+            context['syscheck'] = {
+                'path': syscheck.get('path', ''),
+                'event': syscheck.get('event', ''),
+                'changed_attributes': syscheck.get('changed_attributes', [])
+            }
 
     return context
 
@@ -274,8 +290,8 @@ def extract_ips_with_context(alert):
         raw_value = ""
 
         # Common field patterns that might indicate direction
-        source_patterns = ["srcip", "src_ip", "source_ip"]
-        dest_patterns = ["dstip", "dst_ip", "destination_ip"]
+        source_patterns = ["srcip", "src_ip", "source_ip", "src-ip", "source.ip", "sip", "from_ip"]
+        dest_patterns = ["dstip", "dst_ip", "destination_ip", "dst-ip", "destination.ip", "dip", "to_ip"]
 
         # Helper function to search for IP in a nested dict
         def find_ip_in_dict(data, path=""):
@@ -323,7 +339,7 @@ def extract_ips_with_context(alert):
 
 def query_misp(ip, ip_type, api_key):
     """Query the MISP server for IP information."""
-    url = 'https://10.5.254.41/attributes/restSearch'
+    url = 'https://Y.Y.Y.Y/attributes/restSearch'
     headers = {
         'Accept': 'application/json',
         'Authorization': api_key
@@ -331,7 +347,11 @@ def query_misp(ip, ip_type, api_key):
     payload = {
         'returnFormat': 'json',
         'type': ip_type,
-        'value': ip
+        'value': ip,
+        'includeEventTags': True,
+        'includeContext': True,
+        'includeWarninglistHits': True,
+        'pythonify': False
     }
 
     try:
@@ -348,8 +368,123 @@ def query_misp(ip, ip_type, api_key):
         logging.error(f"Failed to query MISP: {str(e)}")
         return None
 
-def send_enriched_event(ip, misp_data, alert_context, ip_context):
-    """Send enriched event back to Wazuh with alert context."""
+def extract_tags_from_misp(attribute):
+    """Extract tags from MISP attribute and event."""
+    tags = []
+
+    # Extract attribute tags
+    if "Tag" in attribute:
+        for tag in attribute.get("Tag", []):
+            if "name" in tag:
+                tags.append({
+                    "name": tag["name"],
+                    "color": tag.get("colour", "#ffffff"),
+                    "level": "attribute"
+                })
+
+    # Extract event tags if available
+    if "Event" in attribute and "Tag" in attribute["Event"]:
+        for tag in attribute["Event"].get("Tag", []):
+            if "name" in tag:
+                tag_info = {
+                    "name": tag["name"],
+                    "color": tag.get("colour", "#ffffff"),
+                    "level": "event"
+                }
+                if tag_info not in tags:
+                    tags.append(tag_info)
+
+    return tags
+
+def calculate_threat_score(attribute, tags):
+    """Calculate a threat score based on MISP data."""
+    base_score = 0
+
+    # Base score from attribute type/category
+    if attribute.get("category") == "External analysis":
+        base_score += 5
+    if attribute.get("category") == "Network activity":
+        base_score += 3
+
+    # Score based on tags
+    for tag in tags:
+        tag_name = tag["name"].lower()
+
+        # Check for TLP tags and adjust score
+        if "tlp:red" in tag_name:
+            base_score += 8
+        elif "tlp:amber" in tag_name:
+            base_score += 5
+        elif "tlp:green" in tag_name:
+            base_score += 2
+
+        # Check for threat intel tags
+        if "malware" in tag_name:
+            base_score += 7
+        if "ransomware" in tag_name:
+            base_score += 9
+        if "apt" in tag_name:
+            base_score += 8
+        if "botnet" in tag_name:
+            base_score += 6
+        if "phishing" in tag_name:
+            base_score += 5
+        if "scan" in tag_name:
+            base_score += 3
+        if "suspicious" in tag_name:
+            base_score += 4
+
+    # Cap at 10
+    return min(base_score, 10)
+
+def extract_related_attributes(attribute):
+    """Extract related attributes from MISP."""
+    related = []
+
+    if "RelatedAttribute" in attribute:
+        for rel_attr in attribute.get("RelatedAttribute", []):
+            if isinstance(rel_attr, dict):
+                related.append({
+                    "type": rel_attr.get("type", "unknown"),
+                    "value": rel_attr.get("value", ""),
+                    "category": rel_attr.get("category", ""),
+                    "relation": rel_attr.get("relation_type", "related-to")
+                })
+
+    return related
+
+def extract_sightings_info(attribute):
+    """Extract sightings information from MISP attribute."""
+    sightings = {
+        "count": 0,
+        "first_seen": None,
+        "last_seen": None,
+        "sources": []
+    }
+
+    if "Sighting" in attribute:
+        sighting_list = attribute.get("Sighting", [])
+        sightings["count"] = len(sighting_list)
+
+        dates = []
+        for sighting in sighting_list:
+            if "date_sighting" in sighting:
+                dates.append(int(sighting["date_sighting"]))
+
+            # Collect source organizations
+            if "Organisation" in sighting and "name" in sighting["Organisation"]:
+                org_name = sighting["Organisation"]["name"]
+                if org_name not in sightings["sources"]:
+                    sightings["sources"].append(org_name)
+
+        if dates:
+            sightings["first_seen"] = min(dates)
+            sightings["last_seen"] = max(dates)
+
+    return sightings
+
+def send_enriched_event(ip, misp_data, alert_context, ip_context, original_alert):
+    """Send enriched event back to Wazuh with detailed alert context."""
     debug(f"Processing MISP data for IP: {ip}")
 
     # Excluded IPs
@@ -358,21 +493,73 @@ def send_enriched_event(ip, misp_data, alert_context, ip_context):
         debug(f"Skipping excluded IP: {ip}")
         return
 
-    # Build enriched event with alert context
+    # Generate event ID for tracking
+    event_id = hashlib.md5(f"{ip}:{alert_context['rule_id']}:{time.time()}".encode()).hexdigest()
+
+    # Get current timestamp in ISO format
+    timestamp = datetime.now().isoformat()
+
+    # Build detailed enriched event
     enriched_event = {
-        "misp_ip": ip,
-        "misp_attributes": [],
-        "misp_events": [],
-        # Add Wazuh context for correlation
-        "wazuh_context": {
-            "rule_id": alert_context["rule_id"],
-            "rule_description": alert_context["rule_description"],
-            "ip_field": ip_context["field_path"],
-            "ip_direction": ip_context["direction"]
+        "integration": "misp",
+        "event_id": event_id,
+        "timestamp": timestamp,
+        "detected_ip": {
+            "value": ip,
+            "direction": ip_context["direction"],
+            "field_path": ip_context["field_path"],
+            "raw_context": ip_context["raw_value"]
+        },
+        "misp_data": {
+            "attributes": [],
+            "events": [],
+            "summary": {
+                "total_attributes": 0,
+                "total_events": 0,
+                "earliest_event": None,
+                "latest_event": None,
+                "attribution": [],
+                "threat_types": [],
+                "max_threat_score": 0
+            }
         }
     }
 
-    event_ids = set()
+    # Add flattened wazuh_context data with preserved hierarchy
+    enriched_event["rule"] = {
+        "id": alert_context["rule_id"],
+        "description": alert_context["rule_description"],
+        "level": alert_context["rule_level"],
+        "groups": alert_context["rule_groups"]
+    }
+    
+    enriched_event["agent"] = {
+        "id": alert_context["agent_id"],
+        "name": alert_context["agent_name"],
+        "ip": alert_context["agent_ip"]
+    }
+    
+    enriched_event["manager"] = {
+        "name": alert_context["manager_name"]
+    }
+    
+    enriched_event["location"] = alert_context["location"]
+    enriched_event["timestamp"] = alert_context["timestamp"]
+    
+    enriched_event["decoder"] = {
+        "name": alert_context["decoder_name"]
+    }
+
+    # Include flattened original_data fields
+    if "data" in original_alert:
+        for key, value in original_alert["data"].items():
+            enriched_event[key] = value
+
+    unique_event_ids = set()
+    max_score = 0
+    event_dates = []
+    threat_types = set()
+    attribution = set()
 
     # Process all responses for this IP
     for ip_type, response in misp_data.items():
@@ -385,31 +572,120 @@ def send_enriched_event(ip, misp_data, alert_context, ip_context):
             if "value" in attribute and attribute["value"] in excluded_ips:
                 continue
 
-            # Add basic attribute info
+            # Extract tags
+            tags = extract_tags_from_misp(attribute)
+
+            # Calculate threat score
+            threat_score = calculate_threat_score(attribute, tags)
+            max_score = max(max_score, threat_score)
+
+            # Extract related attributes
+            related_attrs = extract_related_attributes(attribute)
+
+            # Extract sightings
+            sightings = extract_sightings_info(attribute)
+
+            # Get event info
+            event_info = attribute.get("Event", {}).get("info", "No info available")
+            event_date = attribute.get("Event", {}).get("date", "")
+            event_id = attribute.get("event_id", "")
+
+            # Track event dates for summary
+            if event_date:
+                event_dates.append(event_date)
+
+            # Extract threat types and attribution from tags
+            for tag in tags:
+                tag_name = tag["name"].lower()
+
+                # Extract threat types
+                for threat_type in ["malware", "ransomware", "apt", "botnet", "phishing", "ddos", "scan"]:
+                    if threat_type in tag_name and threat_type not in threat_types:
+                        threat_types.add(threat_type)
+
+                # Extract attribution
+                if tag_name.startswith("misp-galaxy:threat-actor") or tag_name.startswith("threat-actor"):
+                    # Extract attribution name
+                    parts = tag_name.split("=")
+                    if len(parts) > 1:
+                        actor = parts[1].strip('"')
+                        attribution.add(actor)
+
+            # Add detailed attribute info
             attr_info = {
                 "type": attribute.get("type"),
                 "value": attribute.get("value"),
-                "category": attribute.get("category")
+                "category": attribute.get("category"),
+                "to_ids": attribute.get("to_ids", False),
+                "threat_score": threat_score,
+                "tags": tags,
+                "timestamp": attribute.get("timestamp", ""),
+                "related_attributes": related_attrs,
+                "sightings": sightings,
+                "event_id": event_id
             }
 
-            if attr_info not in enriched_event["misp_attributes"]:
-                enriched_event["misp_attributes"].append(attr_info)
+            enriched_event["misp_data"]["attributes"].append(attr_info)
 
             # Track unique events
-            if "event_id" in attribute and attribute["event_id"] not in event_ids:
-                event_ids.add(attribute["event_id"])
-                enriched_event["misp_events"].append({
-                    "id": attribute["event_id"],
-                    "info": attribute.get("Event", {}).get("info", "No info available")
+            if event_id and event_id not in unique_event_ids:
+                unique_event_ids.add(event_id)
+                enriched_event["misp_data"]["events"].append({
+                    "id": event_id,
+                    "info": event_info,
+                    "date": event_date,
+                    "analysis": attribute.get("Event", {}).get("analysis", ""),
+                    "threat_level_id": attribute.get("Event", {}).get("threat_level_id", ""),
+                    "org_name": attribute.get("Event", {}).get("Orgc", {}).get("name", "Unknown")
                 })
 
+    # Update summary information
+    enriched_event["misp_data"]["summary"]["total_attributes"] = len(enriched_event["misp_data"]["attributes"])
+    enriched_event["misp_data"]["summary"]["total_events"] = len(enriched_event["misp_data"]["events"])
+    enriched_event["misp_data"]["summary"]["max_threat_score"] = max_score
+    enriched_event["misp_data"]["summary"]["threat_types"] = list(threat_types)
+    enriched_event["misp_data"]["summary"]["attribution"] = list(attribution)
+
+    if event_dates:
+        enriched_event["misp_data"]["summary"]["earliest_event"] = min(event_dates)
+        enriched_event["misp_data"]["summary"]["latest_event"] = max(event_dates)
+
+    # Add recommendations based on threat score
+    if max_score >= 8:
+        enriched_event["recommendations"] = {
+            "priority": "high",
+            "actions": [
+                "Block this IP immediately at the firewall level",
+                "Investigate all systems that communicated with this IP",
+                "Preserve forensic evidence for possible incident response",
+                "Escalate to security team immediately"
+            ]
+        }
+    elif max_score >= 5:
+        enriched_event["recommendations"] = {
+            "priority": "medium",
+            "actions": [
+                "Monitor all traffic to/from this IP more closely",
+                "Consider temporary blocking if behavior is suspicious",
+                "Review logs for any suspicious activity involving this IP"
+            ]
+        }
+    elif max_score > 0:
+        enriched_event["recommendations"] = {
+            "priority": "low",
+            "actions": [
+                "Monitor for unusual patterns of communication",
+                "Add to watchlist for increased logging"
+            ]
+        }
+
     # Send event if we have attributes
-    if enriched_event["misp_attributes"]:
-        debug(f"Sending enriched event for IP {ip} with {len(enriched_event['misp_attributes'])} attributes")
+    if enriched_event["misp_data"]["attributes"]:
+        debug(f"Sending enriched event for IP {ip} with {len(enriched_event['misp_data']['attributes'])} attributes")
         send_event(enriched_event)
     else:
         debug(f"No relevant MISP data found for IP {ip}")
-
+        
 def send_event(msg, agent=None):
     """Sends event data to Wazuh."""
     try:
