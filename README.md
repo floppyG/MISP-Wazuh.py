@@ -1,158 +1,69 @@
-🧩 Overview
+    Alert Ingestion & IP Gleaning:
 
-This Python script performs the following tasks:
+        It kicks off when Wazuh feeds it an alert, typically as a JSON file (think active response).
 
-    Parses a Wazuh alert JSON file.
+        The script first sanity-checks if it's a legit Wazuh alert it cares about (e.g., based on rule ID or level).
 
-    Extracts public IP addresses from the alert.
+        Then, it regex-parses the entire alert payload to sniff out any public IP addresses. It's not just grabbing IPs; it tries to figure out their direction (source/destination) and field_path (where in the alert JSON it found the IP) for context.
 
-    Queries MISP for each IP to check for any related threat intelligence.
+    Deduplication Fu (Alert-Level):
 
-    Sends enriched data back to Wazuh, avoiding duplicate processing using a deduplication mechanism.
+        To avoid hammering MISP or creating alert storms in Wazuh, it maintains a local JSON file (recent_misp_logs.json) as a poor man's state cache.
 
-🔧 Imports and Setup
+        It generates a unique key for an alert-IP combo (e.g., rule_id:ip:direction). If this combo has been processed within a defined deduplication_window (e.g., 1 hour), it bails out for that specific IP in that specific alert context.
 
-    Standard libraries like json, sys, logging, os, and time.
+    MISP API Hustle:
 
-    Networking and parsing tools: ipaddress, re, urllib3, socket.
+        For each unique, non-deduplicated public IP, it fires off API calls to the configured MISP instance using the /attributes/restSearch endpoint.
 
-    Third-party: requests for HTTP requests to MISP API.
+        It queries for both ip-src and ip-dst types (or just one if the direction was confidently determined earlier). The API key is, of course, a must-have.
 
-    SSL warnings are suppressed with urllib3.disable_warnings.
+    JSON Munging & Intel Distillation:
 
-🧪 Global Variables
+        If MISP coughs up some data (a JSON response), the script gets down to data wrangling:
 
-    debug_enabled: Enables debug logging if set to True.
+            It iterates through the returned MISP attributes.
 
-    socket_addr: Wazuh UNIX socket path for sending events.
+            It extracts key intel: attribute type, value, category, to_ids flag, tags (both attribute-level and event-level), related attributes, and sighting information.
 
-    recent_logs_file: JSON file to keep track of recently processed logs.
+            It calculates a custom threat_score based on attribute category, tags (giving more weight to things like "malware," "apt," TLP levels), and the to_ids flag.
 
-    deduplication_window: Time window (1 hour) to skip duplicate alerts.
+            It also pulls out details of the MISP events associated with these attributes (ID, info, date, org).
 
-📚 Logging Setup
+    Smart Aggregation (The Noise Reduction Bit):
 
-Logs to /var/ossec/logs/misp_integration.log with timestamps and debug level.
-📦 Class: RecentLogTracker
+        This is a key improvement: Instead of just dumping every single MISP attribute found (which can be super repetitive if the same IP is in many MISP events with similar flagging), it intelligently aggregates them.
 
-Handles deduplication of alert-IP combinations to avoid reprocessing.
-Key Methods:
+        It creates an "aggregation key" based on the core characteristics of an attribute (type, value, category, to_ids, calculated threat_score, tags, related attributes, and sightings).
 
-    _load_logs(): Loads recent logs from JSON file.
+        Attributes sharing the same aggregation key are rolled up. The final enriched log will contain one representative entry for this group, but with a list of all associated_misp_event_ids and attribute_timestamps it originally came from. This drastically cuts down on log verbosity.
 
-    _save_logs(): Saves current log state back to file.
+    Crafting the Enriched Event:
 
-    is_duplicate(key): Checks if the same alert-IP was processed recently.
+        The script constructs a new, beefed-up JSON payload. This "enriched event" includes:
 
-    mark_sent(key): Marks a log as recently sent.
+            An integration: "misp" marker.
 
-    _clean_old_entries(): Purges old entries outside the deduplication window.
+            A unique event_id for this enriched log entry (MD5 hash).
 
-🚀 Function: main(args)
+            A timestamp for when the enrichment happened.
 
-The entry point of the script.
-Steps:
+            The detected_ip details (value, direction, where it was found).
 
-    Reads command-line args: expects alert file path and MISP API key.
+            The misp_data block, now containing:
 
-    Initializes the deduplication tracker.
+                attributes: The list of aggregated MISP attribute objects.
 
-    Parses the alert JSON file.
+                events: A list of unique MISP event details encountered.
 
-    Validates the alert structure and type.
+                summary: A neat summary including total (aggregated) attributes, total unique MISP events, earliest/latest MISP event dates, unique threat types observed, attribution (if any), and the max threat_score.
 
-    Extracts context and relevant public IPs.
+            Crucially, it flattens and re-embeds a lot of the original Wazuh alert's context (rule details, agent info, manager, location, decoder, and fields from the original alert's data section).
 
-    For each IP:
+            It also tacks on some recommendations (e.g., "Block this IP," "Monitor closely") based on the calculated max_threat_score.
 
-        Checks deduplication.
+    Feeding Back to Wazuh:
 
-        Determines if it's a source or destination.
+        Finally, this enriched JSON event is injected back into the Wazuh manager via a Unix domain socket (/var/ossec/queue/sockets/queue).
 
-        Queries MISP using appropriate type (ip-src, ip-dst).
-
-        Sends enriched data back to Wazuh if threat intelligence is found.
-
-🔍 Function: debug(msg)
-
-Logs debug messages to the log file if debug_enabled is True.
-🌐 Function: is_public_ip(ip)
-
-Checks if an IP is public (i.e., not private or loopback).
-✅ Function: validate_wazuh_alert(alert)
-
-Ensures the alert:
-
-    Is a dictionary.
-
-    Has a rule.id.
-
-    Has a severity rule.level > 5.
-
-    Is not excluded (e.g., rule IDs 31530, 31531).
-
-🧠 Function: extract_alert_context(alert)
-
-Extracts contextual info from the alert:
-
-    Rule ID, description, timestamp, agent ID/name, and optional data fields.
-
-🔁 Function: determine_ip_types(context)
-
-Based on direction (source, destination), chooses which MISP IP types to query:
-
-    ip-src, ip-dst, or both.
-
-🕵️ Function: extract_ips_with_context(alert)
-
-Uses regex and recursive dictionary search to:
-
-    Extract all IPs from the alert JSON.
-
-    Identify public IPs only.
-
-    Determine context (field_path, direction) by searching field names (e.g., srcip, dstip).
-
-🔗 Function: query_misp(ip, ip_type, api_key)
-
-Sends a POST request to the MISP server:
-
-    Uses /attributes/restSearch endpoint.
-
-    Authenticates with API key.
-
-    Returns JSON data with relevant attributes/events.
-
-🎁 Function: send_enriched_event(ip, misp_data, alert_context, ip_context)
-
-Builds a structured enriched alert that includes:
-
-    MISP attributes (e.g., threat tags, values, categories).
-
-    Related MISP events (with event_id, info).
-
-    Original Wazuh alert context.
-
-Also:
-
-    Skips specific excluded IPs like 1.1.1.1.
-
-    Only sends enriched alerts with actual MISP data.
-
-📤 Function: send_event(msg, agent=None)
-
-Formats the final message string for Wazuh:
-
-    If agent is unknown (id == 000), sends as general manager message.
-
-    Else, formats it with agent details.
-
-    Uses UNIX domain socket to send to Wazuh.
-
-🔚 Entry Point: if __name__ == "__main__"
-
-Executes the script:
-
-    Wraps main() in a try-except block.
-
-    Logs any unexpected errors.
+        This allows Wazuh to process this new, context-rich event, potentially triggering further rules, alerts, or visualizations.
