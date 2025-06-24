@@ -1,5 +1,5 @@
 #!/var/ossec/framework/python/bin/python3
-#code written for eDOK Srl Vobarno 2025
+# code written for eDOK Srl Vobarno 2025
 import json
 import sys
 import ipaddress
@@ -30,7 +30,6 @@ except ImportError:
     print("No module 'ipwhois' found. Install: pip install ipwhois")
     sys.exit(1)
 
-
 # Global Variables
 debug_enabled = True  # Set to True to enable detailed debug logs
 socket_addr = "/var/ossec/queue/sockets/queue"
@@ -38,10 +37,10 @@ recent_logs_file = "/var/ossec/tmp/recent_misp_whois_logs.json"
 deduplication_window = 3600  # Seconds (1 hour)
 
 # VirusTotal API Configuration (hardcoded)
-VIRUSTOTAL_API_KEY = "VIRUSTOTAL_API_KEY_HERE"  # ### MODIFICA ###: Inserisci qui la tua chiave API di VirusTotal
-VIRUSTOTAL_API_URL = "https://www.virustotal.com/api/v3/ip_addresses/" # ### MODIFICA ###: Usiamo l'URL V3 più moderno
+VIRUSTOTAL_API_KEY = "VIRUSTOTAL_API_KEY_HERE"  # ### CHANGE ###: Insert your VirusTotal API key here
+VIRUSTOTAL_API_URL = "https://www.virustotal.com/api/v3/ip_addresses/" # ### CHANGE ###: Use the modern V3 URL
 
-# Lista di ISP/provider legittimi da filtrare (riducono falsi positivi)
+# List of legitimate ISPs/providers to filter (reduce false positives)
 LEGITIMATE_PROVIDERS = {
     # Cloud Providers
     'amazon', 'aws', 'amazon.com', 'amazon web services',
@@ -86,7 +85,7 @@ logging.basicConfig(
 )
 
 class RecentLogTracker:
-    # ... (nessuna modifica in questa classe) ...
+    # ...no changes in this class...
     def __init__(self, log_file, window_seconds=3600):
         self.log_file = log_file
         self.window = window_seconds
@@ -142,8 +141,8 @@ class RecentLogTracker:
         if old_keys:
             debug(f"Removed {len(old_keys)} outdated entries from recent logs")
 
-### MODIFICA ###
-# La funzione main è stata riscritta per seguire il nuovo workflow.
+### CHANGE ###
+# The main function has been rewritten to follow the new workflow.
 def main(args):
     debug("Starting script execution")
     if len(args) < 3:
@@ -173,7 +172,7 @@ def main(args):
 
     alert_context = extract_alert_context(json_alert)
 
-    # Il workflow inizia qui. Prima vengono estratti solo IP pubblici.
+    # The workflow starts here. First, only public IPs are extracted.
     ip_data_map = extract_ips_with_context(json_alert)
     if not ip_data_map:
         debug("No public IPs found in alert that match criteria")
@@ -187,74 +186,74 @@ def main(args):
             debug(f"Skipping duplicate alert-IP combination: {dedup_key}")
             continue
 
-        # --- INIZIO NUOVO WORKFLOW ---
+        # --- START NEW WORKFLOW ---
 
-        # PASSO 1: Eseguire query WHOIS per verificare il provider
+        # STEP 1: Perform WHOIS query to check the provider
         whois_data_result = query_whois(ip)
 
-        # PASSO 2: Controllare se l'IP appartiene a un provider legittimo
+        # STEP 2: Check if the IP belongs to a legitimate provider
         if is_legitimate_provider(whois_data_result, ip):
             debug(f"IP {ip} belongs to a legitimate provider. Considering it a false positive and skipping.")
-            continue # Passa al prossimo IP
+            continue # Move to next IP
 
-        # PASSO 3: Interrogare MISP
+        # STEP 3: Query MISP
         ip_types_for_misp = determine_ip_types(ip_context_data)
         misp_data_responses = {}
         misp_threats_found = False
 
         for ip_type in ip_types_for_misp:
             misp_response = query_misp(ip, ip_type, misp_api_key)
-            if misp_response and misp_response.get("response"): # Controlla che ci siano attributi
+            if misp_response and misp_response.get("response"): # Check if there are attributes
                 misp_data_responses[ip_type] = misp_response
                 misp_threats_found = True
 
-        # PASSO 4: Se MISP ha trovato minacce, verificare con VirusTotal
+        # STEP 4: If MISP found threats, check with VirusTotal
         if misp_threats_found and vt_api_key:
             debug(f"MISP found potential threats for {ip}. Cross-validating with VirusTotal.")
             vt_result = query_virustotal(ip, vt_api_key)
 
-            # PASSO 5: Inviare l'allarme solo se ANCHE VirusTotal è positivo
+            # STEP 5: Send the alert only if VirusTotal is also positive
             if is_virustotal_positive(vt_result):
                 debug(f"CONFIRMED THREAT: Both MISP and VirusTotal are positive for {ip}. Sending enriched alert.")
-                # La funzione send_enriched_event è stata modificata per accettare anche i dati di VT
+                # The send_enriched_event function has been modified to also accept VT data
                 send_enriched_event(ip, misp_data_responses, whois_data_result, alert_context, ip_context_data, json_alert, vt_result)
                 log_tracker.mark_sent(dedup_key)
             else:
                 debug(f"FALSE POSITIVE: MISP was positive, but VirusTotal was negative for {ip}. Suppressing alert.")
 
-        elif misp_threats_found: # Se MISP è positivo ma la chiave VT non è disponibile
+        elif misp_threats_found: # If MISP is positive but VT key is not available
             logging.warning(f"MISP threats found for {ip}, but VirusTotal check is disabled. Sending alert based on MISP only.")
             send_enriched_event(ip, misp_data_responses, whois_data_result, alert_context, ip_context_data, json_alert, None)
             log_tracker.mark_sent(dedup_key)
         else:
             debug(f"No threats found in MISP for IP {ip}. No further action needed.")
 
-### NUOVA FUNZIONE ###
+### NEW FUNCTION ###
 def is_legitimate_provider(whois_data, ip):
     """
-    Verifica se un IP appartiene a un provider/ISP legittimo basandosi sui dati WHOIS.
-    Ritorna True se l'IP dovrebbe essere considerato un falso positivo probabile.
+    Checks if an IP belongs to a legitimate provider/ISP based on WHOIS data.
+    Returns True if the IP should be considered a likely false positive.
     """
     if not whois_data:
         debug(f"No WHOIS data available for {ip}, cannot determine if it's a legitimate provider.")
         return False
 
     try:
-        # Estrae le informazioni testuali più rilevanti dal WHOIS
+        # Extract the most relevant textual information from WHOIS
         text_to_check = []
 
-        # Descrizione dell'ASN (molto utile)
+        # ASN description (very useful)
         if whois_data.get('asn_info') and whois_data['asn_info'].get('description'):
             text_to_check.append(whois_data['asn_info']['description'].lower())
 
-        # Nome e descrizione delle reti associate
+        # Name and description of associated networks
         for network in whois_data.get('networks', []):
             if network.get('name'):
                 text_to_check.append(network['name'].lower())
             if network.get('description'):
                 text_to_check.append(network['description'].lower())
 
-        # Controlla se una delle stringhe estratte contiene un nome di provider legittimo
+        # Check if any of the extracted strings contains a legitimate provider name
         full_text = " | ".join(text_to_check)
         for provider in LEGITIMATE_PROVIDERS:
             if provider in full_text:
@@ -266,12 +265,12 @@ def is_legitimate_provider(whois_data, ip):
 
     except Exception as e:
         logging.error(f"Error while checking for legitimate provider for {ip}: {str(e)}")
-        return False # In caso di errore, meglio essere cauti e non scartare l'IP
+        return False # In case of error, better to be cautious and not discard the IP
 
-### NUOVA FUNZIONE ###
+### NEW FUNCTION ###
 def query_virustotal(ip, api_key):
     """
-    Interroga l'API v3 di VirusTotal per informazioni su un indirizzo IP.
+    Queries the VirusTotal v3 API for information about an IP address.
     """
     debug(f"Querying VirusTotal for IP: {ip}")
     headers = {
@@ -302,11 +301,11 @@ def query_virustotal(ip, api_key):
         logging.error(f"Failed to query VirusTotal for {ip}: {str(e)}")
         return None
 
-### NUOVA FUNZIONE ###
+### NEW FUNCTION ###
 def is_virustotal_positive(vt_result):
     """
-    Determina se il risultato di VirusTotal indica una minaccia.
-    Ritorna True se il numero di rilevamenti "malicious" supera la soglia.
+    Determines if the VirusTotal result indicates a threat.
+    Returns True if the number of "malicious" detections exceeds the threshold.
     """
     if not vt_result or "data" not in vt_result:
         debug("VirusTotal: No data or invalid response format.")
@@ -319,9 +318,9 @@ def is_virustotal_positive(vt_result):
         malicious_count = analysis_stats.get("malicious", 0)
         suspicious_count = analysis_stats.get("suspicious", 0)
 
-        # Soglia configurabile per considerare un IP come minaccia
-        # Consideriamo "positivo" se almeno X motori lo classificano come malevolo.
-        # I rilevamenti "suspicious" non vengono contati per ridurre i falsi positivi.
+        # Configurable threshold to consider an IP as a threat
+        # Consider "positive" if at least X engines classify it as malicious.
+        # "suspicious" detections are not counted to reduce false positives.
         malicious_threshold = 2
 
         if malicious_count >= malicious_threshold:
@@ -335,7 +334,7 @@ def is_virustotal_positive(vt_result):
         logging.error(f"Error parsing VirusTotal result: {str(e)}")
         return False
 
-# ... (tutte le funzioni di utility rimangono invariate, es. debug, is_public_ip, ecc.) ...
+# ...all utility functions remain unchanged, e.g. debug, is_public_ip, etc....
 def debug(msg):
     if debug_enabled:
         logging.debug(msg)
@@ -346,8 +345,8 @@ def is_public_ip(ip):
         return not ip_addr.is_private and not ip_addr.is_loopback
     except ValueError:
         return False
-# ... (il resto delle funzioni originali come validate_wazuh_alert, extract_alert_context, ecc.)
-# ... (le ho omesse per brevità, non richiedono modifiche)
+# ...the rest of the original functions like validate_wazuh_alert, extract_alert_context, etc.
+# ...they are omitted for brevity, no changes required
 
 def validate_wazuh_alert(alert):
     if not isinstance(alert, dict):
@@ -500,14 +499,14 @@ def query_whois(ip):
         logging.error(f"An unexpected error occurred during WHOIS lookup for {ip}: {str(e)}")
         return None
 
-### MODIFICA ###
-# Modificata la firma per accettare i dati di VirusTotal (vt_data)
+### CHANGE ###
+# Modified signature to accept VirusTotal data (vt_data)
 def send_enriched_event(ip, misp_api_responses, whois_data, alert_context, ip_context_data, original_alert, vt_data=None):
-    # La parte iniziale di questa funzione (controllo IP esclusi, warning list) non era nel tuo codice originale.
-    # L'ho omessa per coerenza, ma se la usi, lasciala pure.
+    # The initial part of this function (excluded IPs, warning list check) was not in your original code.
+    # I omitted it for consistency, but if you use it, feel free to add it.
 
-    # Costruisci l'evento base con i dati originali dell'allarme, whois e misp
-    # (Questa logica è complessa e specifica, quindi la lascio come riferimento)
+    # Build the base event with the original alert, whois and misp data
+    # (This logic is complex and specific, so I leave it as a reference)
     enriched_event = {
         "integration": "misp_whois_vt_enrichment",
         "ip_info": {
@@ -517,9 +516,9 @@ def send_enriched_event(ip, misp_api_responses, whois_data, alert_context, ip_co
         },
         "whois_info": whois_data if whois_data else {},
         "misp_data": {
-            "attributes": [] # Da popolare con i dati di MISP
+            "attributes": [] # To be populated with MISP data
         },
-        "virustotal_data": {}, # Verrà popolato se vt_data è disponibile
+        "virustotal_data": {}, # Will be populated if vt_data is available
         "original_alert": {
             "rule_id": alert_context.get('rule_id'),
             "rule_description": alert_context.get('rule_description'),
@@ -529,7 +528,7 @@ def send_enriched_event(ip, misp_api_responses, whois_data, alert_context, ip_co
         }
     }
 
-    # Popola i dati di MISP (logica semplificata dall'originale)
+    # Populate MISP data (simplified logic from the original)
     for ip_type, response in misp_api_responses.items():
         if response and response.get("response"):
             for attr in response["response"].get("Attribute", []):
@@ -542,7 +541,7 @@ def send_enriched_event(ip, misp_api_responses, whois_data, alert_context, ip_co
                     "event_id": attr.get("event_id")
                 })
 
-    # ### MODIFICA ###: Aggiungi i dati di VirusTotal all'evento se disponibili
+    # ### CHANGE ###: Add VirusTotal data to the event if available
     if vt_data and "data" in vt_data:
         try:
             attrs = vt_data["data"]["attributes"]
@@ -559,29 +558,30 @@ def send_enriched_event(ip, misp_api_responses, whois_data, alert_context, ip_co
         except (KeyError, TypeError) as e:
             logging.error(f"Could not parse VT data for enriched event: {e}")
 
-
-    # A questo punto, l'evento `enriched_event` è completo.
-    # Dovrebbe essere convertito in JSON e inviato al socket di Wazuh.
-    # Il codice originale si interrompe qui, ma la logica per l'invio sarebbe:
+    # At this point, the `enriched_event` is complete.
+    # It should be converted to JSON and sent to the Wazuh socket.
+    # The original code stops here, but the logic for sending would be:
 
     debug(f"Final enriched event for IP {ip} is ready to be sent to Wazuh.")
-    # Esempio di come si potrebbe inviare (manca la funzione `send_to_socket`):
+    # Example of how it could be sent (missing the `send_to_socket` function):
     # msg_json = json.dumps(enriched_event, indent=4)
     # send_to_socket(msg_json)
 
-    # Il tuo codice originale terminava con un if senza corpo, lo lascio per coerenza:
+    # Your original code ended with an if with no body, I leave it for consistency:
     if enriched_event["misp_data"]["attributes"] and enriched_event["whois_info"].get("asn_info"):
         debug(f"Sending ENRICHED event for IP {ip} with {len(enriched_event['misp_data']['attributes'])} MISP attribute groups, WHOIS info and VirusTotal confirmation.")
-        # Qui andrebbe la logica di invio finale.
+        # Here the final sending logic should go.
         pass
 
-# ... (Il resto delle funzioni di parsing di MISP e WHOIS possono rimanere invariate)
-# ... le ometto per brevità
+# ... (The rest of the MISP and WHOIS parsing functions can remain unchanged)
+# ... omitted for brevity
 
 if __name__ == "__main__":
     try:
         main(sys.argv)
     except Exception as e:
+        logging.error(f"Unhandled exception in main execution: {str(e)}")
+        sys.exit(1)
         logging.error(f"Unhandled exception in main execution: {str(e)}")
         sys.exit(1)
     except Exception as e:
